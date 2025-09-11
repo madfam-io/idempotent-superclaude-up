@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Idempotent SuperClaude bootstrap/upgrade script (macOS/Linux)
-# - Ensures Python 3, pipx, uv/uvx (serena MCP), Node/npm (if needed), and Claude CLI
-# - Installs/updates SuperClaude via pipx (PyPI by default, GitHub optional)
-# - Applies the command set via `SuperClaude install` (idempotent)
+# - Ensures: Python 3, pipx, PATH sanity, uv/uvx (for serena MCP), Node/npm (if needed), Claude CLI
+# - Installs/updates SuperClaude via pipx (PyPI by default; GitHub optional)
+# - Applies the command set via `SuperClaude install` (interactive, idempotent)
 #
 # ENV options when running:
-#   SC_SOURCE=pypi|git         # default: pypi; 'git' uses upstream repo
-#   SC_INSTALL_NPM=1           # also install/update the npm wrapper
-#   SC_PERSIST_PATH=1          # append PATH fixes to your shell profile
-#   SC_NO_APPLY=1              # skip running "SuperClaude install"
-#   SC_CLAUDE_INSTALL=npm|brew # force method for Claude CLI
+#   SC_SOURCE=pypi|git          # default: pypi; 'git' uses upstream repo
+#   SC_INSTALL_NPM=1            # also install/update the npm wrapper (@bifrost_inc/superclaude)
+#   SC_PERSIST_PATH=1           # append PATH fixes to your shell profile (~/.zprofile or ~/.bash_profile)
+#   SC_NO_APPLY=1               # skip running "SuperClaude install" (only prep deps & CLI)
+#   SC_CLAUDE_INSTALL=npm|brew  # force method for Claude CLI (default tries npm first, then brew)
+#   SC_SKIP_NODE=1              # don’t try to install/adjust Node (useful on Linux servers)
 set -euo pipefail
 
 REPO_URL="https://github.com/SuperClaude-Org/SuperClaude_Framework.git"
@@ -22,6 +23,7 @@ warn() { printf "\033[1;33m[warn]\033[0m %s\n" "$*"; }
 err()  { printf "\033[1;31m[err ]\033[0m %s\n" "$*" >&2; }
 need_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+# ---------- Python & PATH ----------
 ensure_python() {
   if need_cmd python3; then PY=python3
   elif need_cmd python; then PY=python
@@ -30,7 +32,8 @@ ensure_python() {
     brew install python || err "Failed to install python"
     PY=python3
   else
-    err "Python not found and Homebrew unavailable. Install Python 3 and re-run."; exit 1
+    err "Python not found and Homebrew unavailable. Install Python 3 and re-run."
+    exit 1
   fi
   ok "Using Python: $($PY -V 2>/dev/null)"
 }
@@ -41,9 +44,10 @@ export_user_bin() {
   USER_BIN="$USER_BASE/bin"
   case ":$PATH:" in
     *":$USER_BIN:"*) ;;
-    *) export PATH="$USER_BIN:$HOME/.local/bin:$PATH"
-       warn "Added $USER_BIN to PATH for this session"
-       ;;
+    *)
+      export PATH="$USER_BIN:$HOME/.local/bin:$PATH"
+      warn "Added $USER_BIN to PATH for this session"
+      ;;
   esac
   USER_BIN_PATH="$USER_BIN"  # for persistence
 }
@@ -61,6 +65,7 @@ persist_path_if_requested() {
   fi
 }
 
+# ---------- pipx ----------
 ensure_pipx() {
   if need_cmd pipx; then
     ok "pipx found: $(command -v pipx)"
@@ -77,19 +82,33 @@ ensure_pipx() {
   ok "pipx ready"
 }
 
-ensure_node() {
-  # Only needed if we install Claude CLI via npm or for Playwright
-  if need_cmd node && need_cmd npm; then return 0; fi
-  if [[ "${SC_CLAUDE_INSTALL:-}" == "npm" ]] || ! need_cmd brew; then
-    warn "Node/npm missing; Claude CLI via npm may fail without them."
-    return 0
-  fi
-  warn "Installing Node via Homebrew"
-  brew install node || warn "Homebrew Node install failed"
+# ---------- Node/npm (for Claude CLI via npm and Playwright) ----------
+node_major() {
+  need_cmd node || { echo 0; return; }
+  node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0
 }
 
+ensure_node() {
+  [[ "${SC_SKIP_NODE:-0}" == "1" ]] && return 0
+  local have_node=0; need_cmd node && need_cmd npm && have_node=1 || true
+  if [[ $have_node -eq 0 ]]; then
+    if need_cmd brew; then
+      warn "Node/npm missing; installing Node via Homebrew"
+      brew install node || warn "Homebrew Node install failed"
+    else
+      warn "Node/npm not found and Homebrew unavailable; npm-based Claude install may fail."
+      return 0
+    fi
+  fi
+  # Warn about obviously problematic Node majors (e.g., 21)
+  local MAJOR; MAJOR="$(node_major)"
+  if [[ "$MAJOR" -eq 21 ]]; then
+    warn "Node v21 detected; some npm versions complain. If issues occur, consider: brew install node@22 && brew link --force --overwrite node@22"
+  fi
+}
+
+# ---------- Claude CLI (Anthropic) ----------
 ensure_claude_cli() {
-  # Ensure Anthropic Claude Code CLI is available for MCP server management
   if need_cmd claude; then ok "Claude CLI found: $(command -v claude)"; return 0; fi
   local method="${SC_CLAUDE_INSTALL:-}"
   if [[ "$method" == "brew" ]]; then
@@ -100,28 +119,26 @@ ensure_claude_cli() {
       warn "Homebrew not available; cannot use brew method"
     fi
   else
-    # Default: npm first if available
     if need_cmd npm; then
       warn "Installing Claude CLI via npm"
       npm install -g @anthropic-ai/claude-code || warn "npm install of claude-code failed"
-      if need_cmd npm; then
-        local NPM_BIN
-        NPM_BIN="$(npm bin -g 2>/dev/null || true)"
-        if [[ -n "$NPM_BIN" && ":$PATH:" != *":$NPM_BIN:"* ]]; then
-          export PATH="$NPM_BIN:$PATH"
-          warn "Added npm global bin ($NPM_BIN) to PATH for this session"
-          if [[ "${SC_PERSIST_PATH:-0}" == "1" ]]; then
-            local profile
-            if [[ -n "${ZSH_VERSION:-}" || "${SHELL:-}" == *"zsh"* ]]; then profile="$HOME/.zprofile"; else profile="$HOME/.bash_profile"; fi
-            if ! grep -qs "$NPM_BIN" "$profile"; then
-              printf 'export PATH="%s:$PATH"\n' "$NPM_BIN" >> "$profile"
-              ok "Persisted npm global bin to $profile"
-            fi
+      # Ensure npm global bin is visible
+      local NPM_BIN
+      NPM_BIN="$(npm bin -g 2>/dev/null || true)"
+      if [[ -n "$NPM_BIN" && ":$PATH:" != *":$NPM_BIN:"* ]]; then
+        export PATH="$NPM_BIN:$PATH"
+        warn "Added npm global bin ($NPM_BIN) to PATH for this session"
+        if [[ "${SC_PERSIST_PATH:-0}" == "1" ]]; then
+          local profile
+          if [[ -n "${ZSH_VERSION:-}" || "${SHELL:-}" == *"zsh"* ]]; then profile="$HOME/.zprofile"; else profile="$HOME/.bash_profile"; fi
+          if ! grep -qs "$NPM_BIN" "$profile"; then
+            printf 'export PATH="%s:$PATH"\n' "$NPM_BIN" >> "$profile"
+            ok "Persisted npm global bin to $profile"
           fi
         fi
       fi
     fi
-    # Fallback: brew cask
+    # Fallback to brew cask
     if ! need_cmd claude && need_cmd brew; then
       warn "Falling back to Homebrew cask for Claude CLI"
       brew install --cask claude-code || warn "brew cask install failed"
@@ -131,21 +148,32 @@ ensure_claude_cli() {
   ok "Claude CLI ready: $(claude --version 2>/dev/null || echo 'ok')"
 }
 
+# Shim real 'claude' so pipx/venv processes can see it (avoid shim-to-shim loops)
 ensure_claude_shim() {
-  # Make claude visible inside pipx/venv-run contexts by shimming to user bins
-  local TARGET
-  TARGET="$(command -v claude || true)"
-  [[ -z "$TARGET" ]] && return 0
   local UB="$($PY -m site --user-base 2>/dev/null || echo "$HOME/Library/Python/3.11")/bin"
   mkdir -p "$UB" "$HOME/.local/bin"
+
+  # Resolve actual binary path, dereferencing symlinks
+  local TARGET
+  TARGET="$($PY - <<'PY'
+import os, shutil
+p = shutil.which("claude")
+print(os.path.realpath(p) if p else "")
+PY
+)"
+  if [[ -z "$TARGET" || ! -x "$TARGET" ]]; then
+    warn "No real 'claude' binary found to shim"
+    return 0
+  fi
+
   ln -sf "$TARGET" "$UB/claude"
   ln -sf "$TARGET" "$HOME/.local/bin/claude"
   export PATH="$UB:$HOME/.local/bin:$PATH"
-  ok "Claude CLI shimmed to $UB and ~/.local/bin"
+  ok "Claude CLI shimmed to $UB and ~/.local/bin -> $TARGET"
 }
 
+# ---------- uv/uvx for serena ----------
 ensure_uv() {
-  # Needed by the "serena" MCP server (expects uv/uvx)
   if need_cmd uvx || need_cmd uv; then ok "uv present"; return 0; fi
   warn "uv not found; installing"
   if need_cmd brew; then brew install uv || true; fi
@@ -160,6 +188,7 @@ ensure_uv() {
   if need_cmd uvx || need_cmd uv; then ok "uv ready"; else warn "uv missing (serena MCP may fail)"; fi
 }
 
+# ---------- Status & Install ----------
 show_cli_status() {
   for c in SuperClaude superclaude; do
     if need_cmd "$c"; then
@@ -195,7 +224,8 @@ apply_commands() {
     log "Running via npm wrapper"
     superclaude install || warn "'superclaude install' returned non-zero"
   else
-    err "SuperClaude CLI not found after install"; exit 1
+    err "SuperClaude CLI not found after install"
+    exit 1
   fi
   [[ -d "$HOME/.claude/commands/sc" ]] && ok "Commands present at ~/.claude/commands/sc" || warn "Commands directory missing"
 }
@@ -203,17 +233,25 @@ apply_commands() {
 maybe_install_npm_wrapper() {
   [[ "${SC_INSTALL_NPM:-0}" != "1" ]] && return 0
   if ! need_cmd npm; then warn "npm not found; skipping npm wrapper"; return 0; fi
+  # Warn about PEP 668 environments when wrapper tries to pip install
+  local PYMAJOR
+  PYMAJOR="$($PY - <<'PY'
+import sys; print(sys.version_info.major)
+PY
+)"
+  if [[ "$PYMAJOR" -ge 3 ]]; then
+    warn "If wrapper postinstall hits PEP 668, it's safe to skip — pipx CLI already installed."
+  fi
   log "Installing/upgrading npm wrapper: $NPM_PACKAGE"
   if npm -g ls "$NPM_PACKAGE" --depth=0 >/dev/null 2>&1; then
-    npm -g update "$NPM_PACKAGE" || warn "npm update failed"
+    npm -g update "$NPM_PACKAGE" || warn "npm update failed (wrapper is optional)"
   else
-    npm -g install "$NPM_PACKAGE" || warn "npm install failed"
+    npm -g install "$NPM_PACKAGE" || warn "npm install failed (wrapper is optional)"
   fi
   need_cmd superclaude && ok "npm wrapper: $(superclaude --version 2>/dev/null || echo '?')"
 }
 
 maybe_playwright_browsers() {
-  # If Playwright is installed, ensure browsers are present
   if need_cmd playwright; then
     warn "Ensuring Playwright browsers are installed"
     playwright install >/dev/null 2>&1 || npx playwright install >/dev/null 2>&1 || true
