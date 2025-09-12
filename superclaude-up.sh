@@ -1,231 +1,280 @@
 #!/usr/bin/env bash
-# superclaude-up.sh — Version-adaptive, idempotent SuperClaude bootstrap (macOS & Linux)
-# Goals:
-#   • Install LATEST SUPPORTED bits on current OS/CPU:
-#       - Python user bin PATH sanity, pipx
-#       - uv/uvx (for serena MCP)
-#       - Node via nvm (prefer Node 22, fallback to Node 20 if 22 fails)
-#       - Claude CLI (latest) via npm and shim to user bins
-#       - SuperClaude (prefer latest git; fallback to PyPI)
-#       - realpath (macOS coreutils) for serena wrapper
-#   • Remove bad `alias claude=~/.claude/local/claude` and unify CLI resolution
+# superclaude-up.sh
+# Version-adaptive, idempotent bootstrap for SuperClaude + Claude CLI.
+# - macOS (Intel/ARM) & Linux
+# - Ensures: Python3, pipx, uv/uvx, realpath, Node (nvm: 22→20), Claude CLI
+# - Installs/updates SuperClaude via pipx (from git by default; PyPI fallback)
+# - Scrubs broken "alias claude=..." lines; shims the real CLI into user bins
+# - Optional PATH persistence and non-interactive mode
 #
-# Env toggles:
-#   SC_SOURCE=git|pypi       (default: git → “absolute latest”; use pypi for registry releases)
-#   SC_YES=1                 (non-interactive `SuperClaude install --yes`)
-#   SC_NO_APPLY=1            (skip running `SuperClaude install`)
-#   SC_PERSIST_PATH=1        (append PATH/gnubin persistently to shell profile)
-#   SC_SKIP_NODE=1           (skip Node/nvm management)
-#   SC_CLAUDE_INSTALL=npm|skip  (default npm; set skip to avoid touching Claude CLI)
-#   SC_INSTALL_NPM=1         (also install @bifrost_inc/superclaude wrapper – optional)
-#   SC_SERENA=0              (skip serena prerequisites)
+# ENV OPTIONS:
+#   SC_YES=1                  # auto-confirm (non-interactive where safe)
+#   SC_PERSIST_PATH=1         # persist PATH fixes to your shell profile
+#   SC_SKIP_NODE=1            # don't manage Node/nvm
+#   SC_SOURCE=git|pypi        # where to install SuperClaude from (default git)
+#   SC_SKIP_APPLY=1           # skip `SuperClaude install` wizard
+#   SC_CLAUDE_INSTALL=auto|npm|brew   # how to install Claude CLI (default auto)
 #
-set -Eeuo pipefail
+# SAFE TO RE-RUN ANYTIME.
 
+set -euo pipefail
+
+# ---------- Pretty logging ----------
+if [[ -t 1 ]]; then
+  BOLD="$(printf '\033[1m')" ; DIM="$(printf '\033[2m')" ; OFF="$(printf '\033[0m')"
+  BLUE="$(printf '\033[34m')" ; GREEN="$(printf '\033[32m')" ; YELLOW="$(printf '\033[33m')" ; RED="$(printf '\033[31m')"
+else
+  BOLD="" DIM="" OFF="" BLUE="" GREEN="" YELLOW="" RED=""
+fi
+say(){ printf "%s[info]%s %s\n" "$BLUE" "$OFF" "$*"; }
+ok(){  printf "%s[  OK]%s %s\n"  "$GREEN" "$OFF" "$*"; }
+wrn(){ printf "%s[warn]%s %s\n" "$YELLOW" "$OFF" "$*"; }
+die(){ printf "%s[FAIL]%s %s\n" "$RED" "$OFF" "$*" >&2; exit 1; }
+
+need(){ command -v "$1" >/dev/null 2>&1; }
+
+# ---------- OS / Shell info ----------
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+SHELL_NAME="${SHELL##*/}"
+
+# ---------- Global constants ----------
 REPO_URL="https://github.com/SuperClaude-Org/SuperClaude_Framework.git"
 PIP_PACKAGE="SuperClaude"
-NPM_WRAPPER="@bifrost_inc/superclaude"
 
-# ---------- UI ----------
-say() { printf "\033[1;36m[info]\033[0m %s\n" "$*"; }
-ok()  { printf "\033[1;32m[  OK]\033[0m %s\n" "$*"; }
-wrn() { printf "\033[1;33m[warn]\033[0m %s\n" "$*"; }
-die() { printf "\033[1;31m[FAIL]\033[0m %s\n" "$*" >&2; exit 1; }
-have(){ command -v "$1" >/dev/null 2>&1; }
-
-OS="$(uname -s 2>/dev/null || echo "?")"
-PY="python3"; have python3 || { have python && PY="python"; }
-
-ZSHRC="$HOME/.zshrc"; ZPROFILE="$HOME/.zprofile"
-BASHRC="$HOME/.bashrc"; BASH_PROFILE="$HOME/.bash_profile"
-
-# Version compare helpers
-vernum(){ awk -F. '{printf("%03d%03d%03d\n",$1,$2,$3)}' <<<"${1:-0.0.0}"; }
-ge_ver(){ [ "$(vernum "$1")" -ge "$(vernum "$2")" ]; }
-
-# PATH helpers
-ensure_path(){
-  local seg="$1"
-  case ":$PATH:" in *":$seg:"*) return 0;; esac
-  export PATH="$seg:$PATH"
-  wrn "Added $seg to PATH (session)"
-}
-persist_line(){
-  local line="$1" file="$2"
-  [ -f "$file" ] || return 0
-  grep -qsF "$line" "$file" || printf '%s\n' "$line" >> "$file"
-}
-persist_export(){
-  [ "${SC_PERSIST_PATH:-0}" = "1" ] || return 0
-  local text="$1" profile
-  if [ -n "${ZSH_VERSION:-}" ] || [[ "${SHELL:-}" == *zsh* ]] || [ -f "$ZPROFILE" ]; then
-    profile="$ZPROFILE"
-  else
-    profile="$BASH_PROFILE"
+# ---------- ask/confirm ----------
+ask_yn(){
+  local prompt="${1:-Proceed?}" default="${2:-Y}"
+  if [[ "${SC_YES:-0}" == "1" ]]; then
+    say "$prompt [auto-$default]"
+    return 0
   fi
-  touch "$profile"
-  if ! grep -qsF "$text" "$profile"; then
-    printf '%s\n' "$text" >> "$profile"
-    ok "Persisted to $profile: $text"
-  else
-    ok "Already persisted in $profile"
-  fi
+  local ans
+  read -r -p "$prompt [Y/n] " ans || true
+  [[ -z "$ans" || "${ans^^}" == "Y" || "${ans^^}" == "YES" ]]
 }
 
-# Kill rogue alias/function that masks the real Claude CLI
-purge_bad_aliases(){
-  (alias claude >/dev/null 2>&1) && unalias claude || true
-  typeset -f claude >/dev/null 2>&1 && unset -f claude || true
-  for f in "$ZSHRC" "$ZPROFILE" "$BASHRC" "$BASH_PROFILE" "$HOME/.zshenv" "$HOME/.profile"; do
-    [ -f "$f" ] || continue
-    if grep -qE '^[[:space:]]*alias[[:space:]]+claude=' "$f"; then
-      sed -i.bak '/^[[:space:]]*alias[[:space:]]\+claude=/d' "$f"
-      wrn "Removed alias 'claude=…' from $f (backup: $f.bak)"
-    fi
-  done
-  for f in "$ZSHRC" "$ZPROFILE"; do
-    [ -f "$f" ] || touch "$f"
-    persist_line 'unalias claude 2>/dev/null || true' "$f"
-  done
-}
-
+# ---------- Ensure Python3 ----------
 ensure_python(){
-  if ! have "$PY"; then
-    if [ "$OS" = "Darwin" ] && have brew; then
-      wrn "Installing Python via Homebrew"
-      brew install python || true
-    fi
+  local PY
+  if need python3; then PY=python3
+  elif need python; then PY=python
+  else
+    die "Python3 is required. Please install Python 3 and re-run."
   fi
-  have "$PY" || die "Python 3 not found. Install Python 3 and re-run."
-  ok "Using $($PY -V 2>/dev/null)"
-  local UB="$($PY -m site --user-base 2>/dev/null || echo "$HOME/.local")/bin"
-  mkdir -p "$UB" "$HOME/.local/bin"
-  ensure_path "$UB"
-  ensure_path "$HOME/.local/bin"
-  persist_export 'export PATH="$('"$PY"' -m site --user-base)/bin:$HOME/.local/bin:$PATH"'
+  PY_CMD="$PY"
+  ok "Using Python $("$PY" -V 2>/dev/null)"
 }
 
+# ---------- Export user bin paths (session + optional persist) ----------
+export_user_bins(){
+  USER_BASE="$("$PY_CMD" -m site --user-base 2>/dev/null || true)"
+  [[ -z "${USER_BASE:-}" ]] && USER_BASE="$HOME/.local"  # fallback
+  USER_BIN="$USER_BASE/bin"
+  # Always add ~/.local/bin too (pipx default target)
+  case ":$PATH:" in
+    *":$USER_BIN:"* ) : ;;
+    * ) export PATH="$USER_BIN:$PATH" ; wrn "Added $USER_BIN to PATH (session)";;
+  esac
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"* ) : ;;
+    * ) export PATH="$HOME/.local/bin:$PATH" ; wrn "Added $HOME/.local/bin to PATH (session)";;
+  esac
+
+  if [[ "${SC_PERSIST_PATH:-0}" == "1" ]]; then
+    local profile
+    if [[ "$SHELL_NAME" == "zsh" ]]; then profile="$HOME/.zprofile"; else profile="$HOME/.bash_profile"; fi
+    [[ -f "$profile" ]] || touch "$profile"
+    if ! grep -qs 'export PATH="$HOME/.local/bin:$PATH"' "$profile"; then
+      echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$profile"
+    fi
+    if ! grep -qs "export PATH=\"$USER_BIN:\$PATH\"" "$profile"; then
+      echo "export PATH=\"$USER_BIN:\$PATH\"" >> "$profile"
+    fi
+    ok "PATH persisted in $profile"
+  fi
+}
+
+# ---------- Ensure pipx ----------
 ensure_pipx(){
-  if ! have pipx; then
-    wrn "Installing pipx"
-    if [ "$OS" = "Darwin" ] && have brew; then brew install pipx || true; fi
-    have pipx || $PY -m pip install --user -q pipx || die "pipx install failed"
-  fi
+  if need pipx; then ok "pipx: $(command -v pipx)"; return; fi
+  wrn "pipx not found; installing to user site"
+  "$PY_CMD" -m pip install --user -q pipx || die "pipx install failed"
+  hash -r || true
+  need pipx || die "pipx still not on PATH (open a new shell or enable SC_PERSIST_PATH=1)"
   pipx ensurepath >/dev/null 2>&1 || true
-  ok "pipx: $(command -v pipx)"
+  ok "pipx ready"
 }
 
+# ---------- Ensure uv / uvx (Serena MCP needs this) ----------
 ensure_uv(){
-  [ "${SC_SERENA:-1}" = "1" ] || return 0
-  if have uvx || have uv; then ok "uv present"; return 0; fi
-  wrn "Installing uv"
-  if [ "$OS" = "Darwin" ] && have brew; then brew install uv || true; fi
-  if ! have uvx && ! have uv; then
-    have curl && curl -LsSf https://astral.sh/uv/install.sh | sh || wrn "uv install script failed"
-    hash -r || true
+  if need uvx || need uv; then ok "uv present"; return; fi
+  wrn "uv not found; installing"
+  if [[ "$OS" == "Darwin" ]] && need brew; then
+    brew install uv || wrn "brew install uv failed, trying curl"
   fi
-  if have uvx || have uv; then ok "uv ready"; else wrn "uv still missing (serena may fail)"; fi
-}
-
-ensure_realpath(){
-  [ "${SC_SERENA:-1}" = "1" ] || return 0
-  if have realpath; then ok "realpath present"; return 0; fi
-  if [ "$OS" = "Darwin" ]; then
-    if have brew; then
-      wrn "Installing coreutils for realpath"
-      brew install coreutils || true
-      local GNUBIN="/usr/local/opt/coreutils/libexec/gnubin"
-      [ -d "$GNUBIN" ] && { ensure_path "$GNUBIN"; persist_export 'export PATH="/usr/local/opt/coreutils/libexec/gnubin:$PATH"'; }
-      have realpath && ok "realpath available via coreutils" || wrn "realpath still missing"
+  if ! need uvx && ! need uv; then
+    if need curl; then
+      curl -LsSf https://astral.sh/uv/install.sh | sh || wrn "uv installer script failed"
+      hash -r || true
     else
-      wrn "Homebrew not found; cannot add realpath (serena may fail)"
-    fi
-  else
-    wrn "On Linux, install coreutils via your package manager if realpath is missing"
-  fi
-}
-
-ensure_nvm_loaded(){
-  # shellcheck disable=SC1090
-  [ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh" && have nvm
-}
-
-install_nvm_if_missing(){
-  ensure_nvm_loaded && return 0
-  wrn "Installing nvm (user-space)"
-  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-  ensure_nvm_loaded || die "nvm not available after install"
-}
-
-ensure_node_latest_supported(){
-  [ "${SC_SKIP_NODE:-0}" = "1" ] && { wrn "Skipping Node per SC_SKIP_NODE=1"; return 0; }
-  install_nvm_if_missing
-  # Try newest LTS (currently Node 22). If not supported/build fails → fallback to 20.
-  say "Ensuring Node (prefer 22; fallback 20) via nvm"
-  local installed=""
-  if nvm install 22 >/dev/null 2>&1; then
-    nvm use 22 >/dev/null 2>&1 || true
-    installed="$(node -v 2>/dev/null || echo v0.0.0)"
-    if [[ "$installed" == v22.* ]]; then
-      nvm alias default 22 >/dev/null 2>&1 || true
-      ok "Node $installed via nvm"
-      return 0
+      wrn "curl not available; cannot auto-install uv"
     fi
   fi
-  wrn "Node 22 not available; trying Node 20 LTS"
-  nvm install 20 >/dev/null 2>&1 || die "Failed to install Node 20 with nvm"
-  nvm use 20 >/dev/null 2>&1 || true
-  installed="$(node -v 2>/dev/null || echo v0.0.0)"
-  [[ "$installed" == v20.* ]] || wrn "Node version unexpected: $installed"
-  nvm alias default 20 >/dev/null 2>&1 || true
-  ok "Node $installed via nvm"
+  if need uvx || need uv; then ok "uv ready"; else wrn "uv missing (Serena MCP may not install)"; fi
 }
 
-ensure_claude_cli(){
-  purge_bad_aliases
-  if [ "${SC_CLAUDE_INSTALL:-npm}" = "skip" ]; then
-    wrn "Skipping Claude CLI install per SC_CLAUDE_INSTALL=skip"
-  else
-    have npm || die "npm not found; ensure Node installed"
-    say "Installing/upgrading Claude CLI (@anthropic-ai/claude-code@latest)"
-    npm -g install @anthropic-ai/claude-code@latest >/dev/null 2>&1 || npm -g install @anthropic-ai/claude-code@latest
-  fi
-  if have claude; then
-    local CB; CB="$(command -v claude)"
-    ok "Claude CLI: $(claude --version 2>/dev/null || echo '?') @ $CB"
-    # Shim to user bins
-    local UB="$($PY -m site --user-base)/bin"
-    mkdir -p "$UB" "$HOME/.local/bin"
-    ln -sf "$CB" "$UB/claude"
-    ln -sf "$CB" "$HOME/.local/bin/claude"
-    ok "Claude CLI shimmed to $UB and ~/.local/bin"
-  else
-    wrn "Claude CLI not on PATH after install (continuing)"
-  fi
+# ---------- Ensure realpath (macOS may lack it; Serena wrapper needs it) ----------
+ensure_realpath(){
+  if need realpath; then ok "realpath present"; return; fi
+  wrn "realpath not found; providing a safe shim"
+  mkdir -p "$HOME/.local/bin"
+  cat > "$HOME/.local/bin/realpath" <<'EOS'
+#!/usr/bin/env bash
+# Minimal realpath shim: resolves a single path argument.
+python3 - "$@" <<'PY'
+import os, sys
+if len(sys.argv) < 2:
+    print(os.getcwd())
+else:
+    print(os.path.realpath(sys.argv[1]))
+PY
+EOS
+  chmod +x "$HOME/.local/bin/realpath"
+  hash -r || true
+  if need realpath; then ok "realpath shim installed at ~/.local/bin/realpath"; else die "Failed to create realpath shim"; fi
 }
 
-show_status(){
-  for c in SuperClaude superclaude; do
-    if have "$c"; then ok "$c: $($c --version 2>/dev/null || echo '?') @ $(command -v "$c")"; else wrn "$c not on PATH"; fi
+# ---------- Ensure curl (for nvm/uv installs on bare hosts) ----------
+ensure_curl(){
+  need curl && return 0
+  wrn "curl is required to bootstrap nvm/uv; please install curl via your package manager and re-run."
+}
+
+# ---------- Ensure nvm + Node (prefer 22, fallback 20) ----------
+ensure_node(){
+  [[ "${SC_SKIP_NODE:-0}" == "1" ]] && { wrn "Skipping Node management per SC_SKIP_NODE=1"; return; }
+  ensure_curl
+
+  # Install nvm if needed
+  if ! need nvm; then
+    wrn "nvm not found; installing to ~/.nvm"
+    export NVM_DIR="$HOME/.nvm"
+    mkdir -p "$NVM_DIR"
+    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+    # shellcheck source=/dev/null
+    [[ -s "$NVM_DIR/nvm.sh" ]] && . "$NVM_DIR/nvm.sh"
+  else
+    export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+    # shellcheck source=/dev/null
+    [[ -s "$NVM_DIR/nvm.sh" ]] && . "$NVM_DIR/nvm.sh"
+  fi
+
+  need nvm || die "nvm still not available in this shell"
+
+  # Try Node 22 first, fallback to 20
+  local want_major=22
+  if ! nvm install "$want_major"; then
+    wrn "Node $want_major failed; falling back to 20"
+    want_major=20
+    nvm install "$want_major" || die "Failed to install Node $want_major with nvm"
+  fi
+
+  nvm use "$want_major" >/dev/null
+  nvm alias default "$want_major" >/dev/null
+  ok "Node $(node -v) via nvm"
+}
+
+# ---------- Remove broken 'alias claude=...' lines ----------
+scrub_claude_aliases(){
+  local files=( "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.zshenv" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" )
+  local removed=0
+  for f in "${files[@]}"; do
+    [[ -f "$f" ]] || continue
+    if grep -qE '^[[:space:]]*alias[[:space:]]+claude=' "$f"; then
+      cp "$f" "$f.bak.$(date +%s)" || true
+      # Remove ONLY lines that set alias for claude
+      sed -i '' -e '/^[[:space:]]*alias[[:space:]]\+claude=/d' "$f" 2>/dev/null || sed -i -e '/^[[:space:]]*alias[[:space:]]\+claude=/d' "$f"
+      removed=1
+    fi
   done
-  if have claude; then ok "claude: $(claude --version 2>/dev/null || echo '?') @ $(command -v claude)"; else wrn "claude not on PATH"; fi
-  have uvx && ok "uvx: $(command -v uvx)" || true
-  have realpath && ok "realpath: $(command -v realpath)" || true
+  [[ "$removed" == "1" ]] && wrn "Removed stale 'alias claude=…' from your shell config (backups created)"
 }
 
+# ---------- Install Claude CLI ----------
+install_claude_cli(){
+  local mode="${SC_CLAUDE_INSTALL:-auto}"
+
+  if [[ "$mode" == "brew" ]]; then
+    if [[ "$OS" == "Darwin" ]] && need brew; then
+      say "Installing Claude CLI via Homebrew"
+      brew install --cask claude-code || wrn "brew install failed; switching to npm"
+      mode="npm"
+    else
+      wrn "brew unavailable; switching to npm"
+      mode="npm"
+    fi
+  fi
+
+  if [[ "$mode" == "auto" ]]; then
+    # Prefer npm (works consistently across macOS/Linux when nvm is present)
+    mode="npm"
+  fi
+
+  if [[ "$mode" == "npm" ]]; then
+    need npm || die "npm not found (did nvm install succeed?)"
+    say "Installing/upgrading Claude CLI (@anthropic-ai/claude-code@latest)"
+    npm -g install @anthropic-ai/claude-code@latest >/dev/null 2>&1 || npm -g update @anthropic-ai/claude-code@latest || true
+  fi
+
+  if ! need claude; then
+    die "Claude CLI not found after install"
+  fi
+
+  # Shim into user bins to avoid PATH surprises
+  local CLAUDE_BIN; CLAUDE_BIN="$(command -v claude)"
+  mkdir -p "$HOME/.local/bin" "$USER_BIN"
+  ln -sf "$CLAUDE_BIN" "$HOME/.local/bin/claude"
+  ln -sf "$CLAUDE_BIN" "$USER_BIN/claude"
+  hash -r || true
+
+  ok "Claude CLI: $(claude --version 2>/dev/null)"
+}
+
+# ---------- Show tool status ----------
+show_status(){
+  for c in claude SuperClaude superclaude uvx uv realpath pipx; do
+    if need "$c"; then
+      case "$c" in
+        claude) ok "claude: $(claude --version 2>/dev/null || echo '?') @ $(command -v claude)" ;;
+        SuperClaude|superclaude) ok "$c: $($c --version 2>/dev/null || echo '?') @ $(command -v $c)" ;;
+        *) ok "$c: $(command -v $c)";;
+      esac
+    else
+      wrn "$c not on PATH"
+    fi
+  done
+}
+
+# ---------- Install / upgrade SuperClaude ----------
 install_or_upgrade_superclaude(){
   local src="${SC_SOURCE:-git}"
-  if [ "$src" = "git" ]; then
+  if [[ "$src" == "git" ]]; then
     say "Installing SuperClaude (latest) from git: $REPO_URL"
-    # Force reinstall to ensure we’re on latest main
-    pipx install --pip-args "--upgrade" --force "git+${REPO_URL}" || {
+    if ! pipx install --force "git+${REPO_URL}"; then
       wrn "git install failed; falling back to PyPI"
-      pipx install --pip-args "--upgrade" --force "$PIP_PACKAGE"
-    }
+      if pipx list 2>/dev/null | grep -qiE '^package (SuperClaude|superclaude) '; then
+        say "Upgrading SuperClaude via pipx"
+        pipx upgrade "$PIP_PACKAGE" || pipx install --force "$PIP_PACKAGE"
+      else
+        say "Installing SuperClaude via pipx"
+        pipx install "$PIP_PACKAGE"
+      fi
+    fi
   else
     if pipx list 2>/dev/null | grep -qiE '^package (SuperClaude|superclaude) '; then
       say "Upgrading SuperClaude via pipx"
-      pipx upgrade "$PIP_PACKAGE" || pipx reinstall "$PIP_PACKAGE" || pipx install --force "$PIP_PACKAGE"
+      pipx upgrade "$PIP_PACKAGE" || pipx install --force "$PIP_PACKAGE"
     else
       say "Installing SuperClaude via pipx"
       pipx install "$PIP_PACKAGE"
@@ -233,43 +282,70 @@ install_or_upgrade_superclaude(){
   fi
 }
 
+# ---------- Apply SuperClaude command set (interactive wizard) ----------
 apply_superclaude(){
-  [ "${SC_NO_APPLY:-0}" = "1" ] && { wrn "Skipping SuperClaude install per SC_NO_APPLY=1"; return 0; }
-  if have SuperClaude; then
-    say "Running SuperClaude install (idempotent)"
-    if [ "${SC_YES:-0}" = "1" ]; then SuperClaude install --yes || wrn "'SuperClaude install' returned non-zero"
-    else SuperClaude install || wrn "'SuperClaude install' returned non-zero"
-    fi
-  elif have superclaude; then
-    say "Running superclaude install (npm wrapper)"
+  [[ "${SC_SKIP_APPLY:-0}" == "1" ]] && { wrn "Skipping 'SuperClaude install' per SC_SKIP_APPLY=1"; return; }
+  if need SuperClaude; then
+    say "Launching SuperClaude interactive installer (idempotent)"
+    SuperClaude install || wrn "'SuperClaude install' returned non-zero (you can re-run it anytime)"
+  elif need superclaude; then
+    say "Launching via 'superclaude' wrapper"
     superclaude install || wrn "'superclaude install' returned non-zero"
   else
-    wrn "SuperClaude CLI not found after install"
+    die "SuperClaude CLI not found after install"
   fi
 }
 
-maybe_install_npm_wrapper(){
-  [ "${SC_INSTALL_NPM:-0}" = "1" ] || return 0
-  have npm || { wrn "npm not found; skipping npm wrapper"; return 0; }
-  say "Installing/upgrading npm wrapper: $NPM_WRAPPER"
-  if npm -g ls "$NPM_WRAPPER" --depth=0 >/dev/null 2>&1; then npm -g update "$NPM_WRAPPER" || wrn "npm update failed"
-  else npm -g install "$NPM_WRAPPER" || wrn "npm install failed"; fi
-  have superclaude && ok "npm wrapper: $(superclaude --version 2>/dev/null || echo '?')" || wrn "npm wrapper not on PATH"
+# ---------- Post-flight MCP check ----------
+mcp_healthcheck(){
+  if ! need claude; then wrn "Claude CLI missing; skipping MCP check"; return; fi
+  say "Checking MCP server health..."
+  claude mcp list || wrn "Claude MCP listing failed (this can be transient)"
 }
 
+# ---------- zsh compaudit nudge (do NOT auto-fix) ----------
+compaudit_nag(){
+  if [[ "$SHELL_NAME" == "zsh" ]] && need compaudit; then
+    local bad
+    bad="$(compaudit || true)"
+    if [[ -n "$bad" ]]; then
+      wrn "zsh reports 'insecure directories'. To fix manually:"
+      printf "%s\n" "$bad" | sed 's/^/  /'
+      echo "Suggested (review before running):"
+      echo "  compaudit | xargs -I{} chmod g-w '{}'   # remove group-writable"
+      echo "  compaudit | xargs -I{} chown $USER '{}' # ensure owner is you"
+      echo "Then restart your shell."
+    fi
+  fi
+}
+
+# ==================== MAIN ====================
 main(){
   say "=== SuperClaude updater (version-adaptive, idempotent) ==="
+
   ensure_python
+  export_user_bins
   ensure_pipx
   ensure_uv
   ensure_realpath
-  ensure_node_latest_supported
-  ensure_claude_cli
+  [[ "${SC_SKIP_NODE:-0}" != "1" ]] && ensure_node || wrn "Node management skipped"
+
+  scrub_claude_aliases
+  install_claude_cli
   show_status
+
   install_or_upgrade_superclaude
   show_status
+
   apply_superclaude
-  maybe_install_npm_wrapper
-  ok "Done. Re-run this script any time to stay up-to-date."
+  mcp_healthcheck
+  compaudit_nag
+
+  ok "Done. Re-run this script anytime to stay updated."
+  echo
+  wrn "If you use 'magic' or 'morph' MCP servers, set your API keys:"
+  echo "  export TWENTYFIRST_API_KEY=...   # 21st.dev"
+  echo "  export MORPH_API_KEY=...         # Morph Fast Apply"
 }
+
 main "$@"
