@@ -1,232 +1,288 @@
-# superclaude-up.sh — README
+# superclaude-up.sh — Version-adaptive, idempotent bootstrap for SuperClaude + Claude CLI
 
-An idempotent, “works-from-a-clean-machine” bootstrap script for **SuperClaude**.
-
-It installs/updates the SuperClaude CLI and framework, wires in required system dependencies, and runs the interactive installer to lay down commands, modes, agents, and MCP servers. Safe to re-run anytime.
+This script sets up a **reliable SuperClaude + Claude Code CLI environment** on **macOS (Intel/Apple Silicon)** and **Linux**. It’s designed to be **safe to re-run** and **version-adaptive**: you’ll always get the **newest compatible** toolchain for your machine.
 
 ---
 
-## What it does (in order)
+## What it does
 
-1. **Ensures Python 3** is available (uses Homebrew on macOS if needed).
-2. **Fixes PATH for user installs** (adds your Python *user base* bin for this session; optional persistent fix).
-3. **Ensures `pipx`** (preferred isolation for Python CLIs).
-4. **Ensures Node/npm (optional)** if you install the Claude CLI via npm.
-5. **Ensures the Anthropic Claude CLI (`claude`)** via npm or Homebrew (configurable).
-6. **Shims `claude` into user bins** so it’s visible inside `pipx`/venv contexts (fixes “Claude CLI not found” during MCP setup).
-7. **Ensures `uv`/`uvx`** (required by the `serena` MCP server).
-8. **Installs/updates SuperClaude** via `pipx` (PyPI by default, or GitHub).
-9. **Runs `SuperClaude install`** (interactive, idempotent).
-10. **(Optional) Installs the npm wrapper** `@bifrost_inc/superclaude`.
-11. **(Optional) Installs Playwright browsers** if Playwright is present.
+* **Python toolchain**
+
+  * Detects Python 3, sets up `pipx`, and repairs broken venv shims if needed.
+* **Node toolchain (nvm)**
+
+  * Installs **Node 22** when possible, otherwise falls back to **Node 20** (customizable).
+  * Uses **nvm** so you never compile Node on older macOS versions.
+* **Core CLIs**
+
+  * Installs **Claude CLI** (`@anthropic-ai/claude-code`) via npm (or Homebrew if you ask).
+  * Installs/updates **SuperClaude** via `pipx` (prefers **git**; falls back to **PyPI**).
+* **System helpers**
+
+  * Ensures **uv/uvx** (for Serena MCP) and **realpath** (ships a safe shim on macOS if missing).
+* **PATH sanity**
+
+  * Removes stale `alias claude=…` lines from your shell rc.
+  * Symlinks the real `claude` + SuperClaude entrypoints into `~/.local/bin`.
+  * Optionally **persists PATH** fixes to your shell profile.
+* **MCP servers (stable by default)**
+
+  * Registers MCP servers so they **launch from `$HOME`**, avoiding project workspace collisions (`npm ERR! EDUPLICATEWORKSPACE` in monorepos).
+  * Installs Serena via `uvx` if available.
+* **Safety & idempotency**
+
+  * No `sudo`. No system Python tampering. Re-run anytime.
 
 ---
 
-## Requirements
+## Supported platforms
 
-* macOS or Linux shell (tested with **zsh** and **bash**)
-* Internet access
-* One of:
-
-  * **Homebrew** (recommended on macOS), or
-  * existing **Python 3** and **npm** for CLI paths
-
-> The script will try to install what’s missing (Python via Homebrew, `pipx` via `pip`, Claude CLI via npm/brew, `uv` via curl/brew).
+* macOS 11+ (Intel & Apple Silicon).
+  *Older macOS tiers are handled by using `nvm` binaries rather than Homebrew-built Node.*
+* Linux x86\_64/ARM64 with standard userland tools.
 
 ---
 
 ## Quick start
 
-1. Save the script (overwrite if it already exists):
+1. Save the script as `superclaude-up.sh` and make it executable:
 
-```bash
-cat > superclaude-up.sh <<'BASH'
-# (paste the script contents you have)
-BASH
-chmod +x superclaude-up.sh
-```
+   ```bash
+   chmod +x superclaude-up.sh
+   ```
 
-2. Run it (interactive install by default):
+2. Run it (interactive defaults):
 
-```bash
-bash superclaude-up.sh
-```
+   ```bash
+   ./superclaude-up.sh
+   ```
 
-3. In the **installer UI**:
+3. Prefer **non-interactive**:
 
-* **Stage 1 (MCP servers):** pick your servers (e.g., `1,2,3,4,5,6`).
-* **Stage 2 (Framework components):** `all` or a subset (at least `core`, `modes`, `commands`).
+   ```bash
+   SC_YES=1 SC_PERSIST_PATH=1 SC_SKIP_APPLY=1 ./superclaude-up.sh
+   ```
 
----
-
-## Environment options
-
-Set as prefixes when running the script:
-
-* `SC_SOURCE=pypi|git`
-  Install SuperClaude from **PyPI** (default) or directly from **GitHub**.
-
-* `SC_INSTALL_NPM=1`
-  Also install/update the **npm wrapper** (`@bifrost_inc/superclaude`).
-
-* `SC_PERSIST_PATH=1`
-  Append PATH fixes to your shell profile (`~/.zprofile` or `~/.bash_profile`).
-
-* `SC_NO_APPLY=1`
-  **Skip** running the interactive `SuperClaude install` (only prep deps & CLI).
-
-* `SC_CLAUDE_INSTALL=npm|brew`
-  Force how the **Claude CLI** is installed (defaults to npm if available, else brew).
-
-### Examples
-
-```bash
-# Typical first run: persist PATH and install npm wrapper too
-SC_PERSIST_PATH=1 SC_INSTALL_NPM=1 bash superclaude-up.sh
-
-# Install from GitHub instead of PyPI
-SC_SOURCE=git bash superclaude-up.sh
-
-# Prepare everything but skip the interactive installer
-SC_NO_APPLY=1 bash superclaude-up.sh
-
-# Force Claude CLI install via Homebrew cask
-SC_CLAUDE_INSTALL=brew bash superclaude-up.sh
-```
+> You can re-run the script anytime to update/repair your setup.
 
 ---
 
-## After running: sanity checks
+## Environment variables (optional)
+
+| Var                 | Default | What it controls                                            |     |                                     |
+| ------------------- | ------- | ----------------------------------------------------------- | --- | ----------------------------------- |
+| `SC_YES`            | `0`     | `1` = auto-confirm safe prompts.                            |     |                                     |
+| `SC_PERSIST_PATH`   | `0`     | `1` = append PATH fixes to your shell profile.              |     |                                     |
+| `SC_SKIP_NODE`      | `0`     | `1` = don’t install/manage Node/nvm.                        |     |                                     |
+| `SC_NODE_PREFERRED` | `22`    | Preferred Node major.                                       |     |                                     |
+| `SC_NODE_FALLBACK`  | `20`    | Fallback Node major.                                        |     |                                     |
+| `SC_SOURCE`         | `git`   | Where SuperClaude is installed from (`git` or `pypi`).      |     |                                     |
+| `SC_SKIP_APPLY`     | `0`     | `1` = skip `SuperClaude install` wizard.                    |     |                                     |
+| `SC_CLAUDE_INSTALL` | `auto`  | \`auto                                                      | npm | brew\` — how to install Claude CLI. |
+| `SC_ADD_MCP`        | `1`     | `1` = register MCP servers (from `$HOME`). Set `0` to skip. |     |                                     |
+
+**Examples**
+
+* Headless “just fix it”:
+
+  ```bash
+  SC_YES=1 SC_PERSIST_PATH=1 SC_SKIP_APPLY=1 ./superclaude-up.sh
+  ```
+
+* Use Homebrew for Claude CLI on macOS:
+
+  ```bash
+  SC_CLAUDE_INSTALL=brew ./superclaude-up.sh
+  ```
+
+* Skip Node (you already have nvm/Node):
+
+  ```bash
+  SC_SKIP_NODE=1 ./superclaude-up.sh
+  ```
+
+---
+
+## What gets installed/ensured
+
+* **Python 3** (pre-existing), **pipx**, **uv/uvx**, **realpath** (shim if needed)
+* **nvm + Node** (**22** → fallback **20**), **npm**
+* **Claude CLI** (`claude`) — shims placed in `~/.local/bin`
+* **SuperClaude** (`SuperClaude`/`superclaude`) via `pipx`
+* **MCP servers** registered to launch from `$HOME`:
+
+  * `sequential-thinking`
+  * `context7`
+  * `magic` (requires `TWENTYFIRST_API_KEY` for full functionality)
+  * `playwright`
+  * `morphllm-fast-apply` (optional `MORPH_API_KEY`)
+  * `serena` via `uvx` (if `uvx` available)
+
+> Using `$HOME` as the MCP launch cwd prevents npm workspace name collisions you get inside monorepos.
+
+---
+
+## Verifying your setup
 
 ```bash
-# SuperClaude and wrapper
-SuperClaude --version
-superclaude --version  # if you installed the npm wrapper
-
-# Commands laid down?
-ls -1 ~/.claude/commands/sc | head
-
-# Claude CLI & MCP
+# Claude CLI exists and reports a version
 which claude && claude --version
-claude mcp --help  # should print usage
 
-# (Optional) ensure Playwright has browsers
-playwright install || npx playwright install
+# SuperClaude exists (either name)
+which SuperClaude || which superclaude
+SuperClaude --version 2>/dev/null || superclaude --version 2>/dev/null
+
+# MCP servers registered
+claude mcp list
 ```
 
-If you use these MCP servers, add keys and re-run Stage 1 for that server only:
+You should see your MCP servers listed. If you run in a monorepo and previously saw `npm ERR! EDUPLICATEWORKSPACE`, that should be gone now.
+
+---
+
+## API keys you might want
+
+If you selected these MCPs, set their keys in your shell rc (`~/.zshrc`, `~/.bashrc`, etc.):
 
 ```bash
-# magic / 21st.dev
-echo 'export TWENTYFIRST_API_KEY="your_21st_dev_key"' >> ~/.zprofile
-# morph fast-apply
-echo 'export MORPH_API_KEY="your_morph_key"' >> ~/.zprofile
-source ~/.zprofile
-SuperClaude install   # Stage 1: select only the server you want to refresh
+export TWENTYFIRST_API_KEY="..."  # for @21st-dev/magic
+export MORPH_API_KEY="..."        # for @morph-llm/morph-fast-apply
 ```
+
+Restart your shell (or `source` your rc file) after setting keys.
 
 ---
 
 ## Troubleshooting
 
-**“Claude CLI not found – required for MCP server management”**
+### “Claude CLI not found” or wrong version
 
-* The script installs `claude` and **shims it** into user bins, but if corporate path rules or shells differ:
-
-  ```bash
-  # Make sure claude is reachable
-  which claude || npm i -g @anthropic-ai/claude-code
-  # Shim into user bins pipx can see
-  UB="$(python3 -m site --user-base)/bin"; mkdir -p "$UB" "$HOME/.local/bin"
-  ln -sf "$(command -v claude)" "$UB/claude"
-  ln -sf "$(command -v claude)" "$HOME/.local/bin/claude"
-  export PATH="$UB:$HOME/.local/bin:$PATH"
-  ```
-
-  Then re-run `SuperClaude install` and select only MCP servers.
-
-**`pipx` installed but “not on PATH”**
-
-* Add user-base bin:
+* Remove stale aliases and ensure PATH shims exist:
 
   ```bash
-  echo 'export PATH="$(python3 -m site --user-base)/bin:$HOME/.local/bin:$PATH"' >> ~/.zprofile
-  exec zsh -l
+  grep -R 'alias[[:space:]]\+claude=' ~/.zshrc ~/.zprofile ~/.zshenv ~/.bashrc ~/.bash_profile ~/.profile 2>/dev/null
+  # If you see any, delete those lines, then:
+  SC_YES=1 ./superclaude-up.sh
   ```
+* Make sure `~/.local/bin` is in your PATH (the script can persist this for you with `SC_PERSIST_PATH=1`).
 
-**`serena` server fails with `uvx` not found**
+### `npm ERR! EDUPLICATEWORKSPACE` when MCP starts
 
-* Install `uv`:
+* The script registers MCPs to run from **`$HOME`** with `npx -C "$HOME"` — this avoids the collision.
+* Re-register manually if needed:
 
   ```bash
-  brew install uv || curl -LsSf https://astral.sh/uv/install.sh | sh
-  exec zsh -l
-  SuperClaude install  # Stage 1: select "serena" only
+  claude mcp remove magic 2>/dev/null || true
+  claude mcp add magic npx -y -C "$HOME" @21st-dev/magic
   ```
 
-**Playwright says browsers missing**
+### Serena fails to start
 
-```bash
-npm i -g playwright || true
-playwright install || npx playwright install
-```
+* Make sure `uvx` is installed (the script attempts to install `uv`) and `realpath` exists (shim is provided).
+* Re-register:
 
-**npm global bin not on PATH**
+  ```bash
+  claude mcp remove serena 2>/dev/null || true
+  claude mcp add serena uvx -- --from git+https://github.com/oraios/serena serena-mcp-server
+  ```
 
-```bash
-echo 'export PATH="$(npm bin -g):$PATH"' >> ~/.zprofile
-exec zsh -l
-```
+### `pipx` shows SuperClaude installed, but `SuperClaude` isn’t on PATH
+
+* The script will try to repair, but you can do it manually:
+
+  ```bash
+  pipx uninstall superclaude || true
+  pipx install SuperClaude
+  ln -sf ~/.local/pipx/venvs/superclaude/bin/SuperClaude ~/.local/bin/SuperClaude
+  ln -sf ~/.local/pipx/venvs/superclaude/bin/superclaude ~/.local/bin/superclaude
+  hash -r
+  ```
+
+### zsh: “insecure directories, run compaudit”
+
+* The script **does not** auto-chmod. Review and fix manually:
+
+  ```bash
+  compaudit
+  # Suggested (review carefully!)
+  compaudit | xargs -I{} chmod g-w '{}'
+  compaudit | xargs -I{} chown "$USER" '{}'
+  ```
+
+### Old macOS can’t build Node 22 with Homebrew
+
+* That’s expected for Tier-3 macOS. The script uses **nvm** to fetch a compatible binary and falls back to **Node 20** automatically.
 
 ---
 
-## What gets installed & where
+## Uninstall / Reset
 
-* **SuperClaude CLI** (Python): `pipx` venv at `~/.local/pipx/venvs/superclaude`, entrypoints in `~/.local/bin/`
-* **SuperClaude framework files**: `~/.claude/` (core, modes, commands, agents, docs)
-* **Claude CLI**: npm global bin (e.g., `/usr/local/bin` or `$NPM_PREFIX/bin`) or Homebrew cask
-* **MCP servers**: registered for Claude Code (managed by `claude mcp …`)
-* **Shims**: `claude` symlinks in your Python user-base bin and `~/.local/bin`
-
-> The SuperClaude installer itself backs up `~/.claude` inside `~/.claude/backups/…` when updating.
-
----
-
-## Uninstall / cleanup (optional)
-
-* Remove SuperClaude (pipx):
+* Remove Claude CLI (npm):
 
   ```bash
-  pipx uninstall SuperClaude
+  npm -g uninstall @anthropic-ai/claude-code || true
   ```
-* Remove framework files:
+* Remove SuperClaude:
 
   ```bash
+  pipx uninstall superclaude || true
   rm -rf ~/.claude
   ```
-* Remove Claude CLI:
+* Remove MCP registrations:
 
   ```bash
-  npm -g uninstall @anthropic-ai/claude-code || brew uninstall --cask claude-code
+  claude mcp list | awk '{print $1}' | xargs -I{} claude mcp remove {} || true
   ```
-* Remove shims:
+* Clean PATH shims / aliases you added manually.
+
+---
+
+## Design notes & guarantees
+
+* **Idempotent**: safe to run repeatedly; it updates in place.
+* **No sudo**: user-local installs only.
+* **Version-adaptive**: newest compatible versions for your OS/CPU.
+* **Stable MCPs**: always launched from a **clean cwd** to avoid local workspace conflicts.
+
+---
+
+## Common run modes
+
+* **Everything, auto-confirm, persist PATH, skip the interactive wizard**
 
   ```bash
-  rm -f "$(python3 -m site --user-base)/bin/claude" "$HOME/.local/bin/claude"
+  SC_YES=1 SC_PERSIST_PATH=1 SC_SKIP_APPLY=1 ./superclaude-up.sh
+  ```
+* **Use Homebrew for Claude on macOS**
+
+  ```bash
+  SC_CLAUDE_INSTALL=brew ./superclaude-up.sh
+  ```
+* **Pin Node policy**
+
+  ```bash
+  SC_NODE_PREFERRED=22 SC_NODE_FALLBACK=20 ./superclaude-up.sh
+  ```
+* **Skip MCP registration (do it yourself later)**
+
+  ```bash
+  SC_ADD_MCP=0 ./superclaude-up.sh
   ```
 
 ---
 
-## FAQ
+## After install: quick sanity checks
 
-**Is it safe to run multiple times?**
-Yes. The script is **idempotent**; it upgrades if present and installs if missing.
+```bash
+claude --version
+claude mcp list
+SuperClaude --version 2>/dev/null || superclaude --version
+```
 
-**Do I have to install from PyPI?**
-No. Set `SC_SOURCE=git` to install directly from the upstream repository.
+If anything looks off, just re-run:
 
-**Why do we “shim” `claude`?**
-The SuperClaude installer runs from a `pipx` environment; shimming ensures that `claude` is resolvable in that context, avoiding the “Claude CLI not found” error during MCP setup.
+```bash
+SC_YES=1 ./superclaude-up.sh
+```
 
-**Can I skip the interactive installer?**
-Yes. Use `SC_NO_APPLY=1` to only prep dependencies and the CLI, then run `SuperClaude install` later.
+That’s it. Happy building!
