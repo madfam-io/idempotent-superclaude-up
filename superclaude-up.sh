@@ -267,7 +267,7 @@ register_mcp_servers(){
 
   # Serena via uvx (needs uvx + realpath)
   if need uvx || need uv; then
-    claude mcp add serena uvx -- --from git+https://github.com/oraios/serena serena-mcp-server || true
+    claude mcp add serena -- uvx --from git+https://github.com/oraios/serena serena-mcp-server || true
   else
     wrn "Skipping Serena MCP (uvx not available)"
   fi
