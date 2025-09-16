@@ -257,22 +257,35 @@ register_mcp_servers(){
   local NPX_HOME=(npx -y -C "$HOME")
 
   say "Registering MCP servers (launching from \$HOME)..."
-  claude mcp add sequential-thinking    "${NPX_HOME[@]}" @modelcontextprotocol/server-sequential-thinking || true
-  claude mcp add context7               "${NPX_HOME[@]}" @upstash/context7-mcp || true
-  claude mcp add magic                  "${NPX_HOME[@]}" @21st-dev/magic || true
-  claude mcp add playwright             "${NPX_HOME[@]}" @playwright/mcp@latest || true
+  claude mcp add sequential-thinking    -- "${NPX_HOME[@]}" @modelcontextprotocol/server-sequential-thinking || true
+  claude mcp add context7               -- "${NPX_HOME[@]}" @upstash/context7-mcp || true
+  claude mcp add magic                  -- "${NPX_HOME[@]}" @21st-dev/magic || true
+  claude mcp add playwright             -- "${NPX_HOME[@]}" @playwright/mcp@latest || true
+  claude mcp add morphllm-fast-apply    -- "${NPX_HOME[@]}" @morph-llm/morph-fast-apply || true
 
-  # Morph Fast Apply (optional key: MORPH_API_KEY)
-  claude mcp add morphllm-fast-apply    "${NPX_HOME[@]}" @morph-llm/morph-fast-apply || true
-
-  # Serena via uvx (needs uvx + realpath)
   if need uvx || need uv; then
-    claude mcp add serena -- uvx --from git+https://github.com/oraios/serena serena-mcp-server || true
+    claude mcp add serena               -- uvx --from git+https://github.com/oraios/serena serena-mcp-server || true
   else
     wrn "Skipping Serena MCP (uvx not available)"
   fi
 
-  ok "MCP servers registered with clean CWD"
+  ok "MCP servers registered (user/global scope)"
+
+  # --- Optional: if current dir has a local .claude.json with mcpServers, mirror registrations to project scope too
+  if [[ -f .claude.json ]] && grep -q '"mcpServers"' .claude.json 2>/dev/null; then
+    wrn "Project-level .claude.json with mcpServers detected; mirroring registrations into project scope"
+    claude mcp remove sequential-thinking context7 magic playwright morphllm-fast-apply serena >/dev/null 2>&1 || true
+
+    claude mcp add sequential-thinking    -- "${NPX_HOME[@]}" @modelcontextprotocol/server-sequential-thinking || true
+    claude mcp add context7               -- "${NPX_HOME[@]}" @upstash/context7-mcp || true
+    claude mcp add magic                  -- "${NPX_HOME[@]}" @21st-dev/magic || true
+    claude mcp add playwright             -- "${NPX_HOME[@]}" @playwright/mcp@latest || true
+    claude mcp add morphllm-fast-apply    -- "${NPX_HOME[@]}" @morph-llm/morph-fast-apply || true
+    if need uvx || need uv; then
+      claude mcp add serena               -- uvx --from git+https://github.com/oraios/serena serena-mcp-server || true
+    fi
+    ok "MCP servers registered (project scope)"
+  fi
 }
 
 # ---------- Optional interactive apply ----------
