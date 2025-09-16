@@ -1,288 +1,275 @@
-# superclaude-up.sh — Version-adaptive, idempotent bootstrap for SuperClaude + Claude CLI
+# Idempotent SuperClaude Up 🚀
 
-This script sets up a **reliable SuperClaude + Claude Code CLI environment** on **macOS (Intel/Apple Silicon)** and **Linux**. It’s designed to be **safe to re-run** and **version-adaptive**: you’ll always get the **newest compatible** toolchain for your machine.
+A **version-adaptive, re-runnable** setup script for getting a great local **Claude Code** + **SuperClaude** + **MCP servers** developer environment on macOS (Intel/ARM) and Linux — including gnarly monorepos.
 
----
+This repo contains one file you care about:
 
-## What it does
-
-* **Python toolchain**
-
-  * Detects Python 3, sets up `pipx`, and repairs broken venv shims if needed.
-* **Node toolchain (nvm)**
-
-  * Installs **Node 22** when possible, otherwise falls back to **Node 20** (customizable).
-  * Uses **nvm** so you never compile Node on older macOS versions.
-* **Core CLIs**
-
-  * Installs **Claude CLI** (`@anthropic-ai/claude-code`) via npm (or Homebrew if you ask).
-  * Installs/updates **SuperClaude** via `pipx` (prefers **git**; falls back to **PyPI**).
-* **System helpers**
-
-  * Ensures **uv/uvx** (for Serena MCP) and **realpath** (ships a safe shim on macOS if missing).
-* **PATH sanity**
-
-  * Removes stale `alias claude=…` lines from your shell rc.
-  * Symlinks the real `claude` + SuperClaude entrypoints into `~/.local/bin`.
-  * Optionally **persists PATH** fixes to your shell profile.
-* **MCP servers (stable by default)**
-
-  * Registers MCP servers so they **launch from `$HOME`**, avoiding project workspace collisions (`npm ERR! EDUPLICATEWORKSPACE` in monorepos).
-  * Installs Serena via `uvx` if available.
-* **Safety & idempotency**
-
-  * No `sudo`. No system Python tampering. Re-run anytime.
+* `superclaude-up.sh` — the script. Run it as many times as you like.
 
 ---
 
-## Supported platforms
+## Why this exists
 
-* macOS 11+ (Intel & Apple Silicon).
-  *Older macOS tiers are handled by using `nvm` binaries rather than Homebrew-built Node.*
-* Linux x86\_64/ARM64 with standard userland tools.
+Setting up Claude Code + MCP servers can be flaky across machines & projects:
+
+* Global vs project **MCP scope** is easy to mix up.
+* **Monorepos** with npm workspaces can crash `npx` (hello `EDUPLICATEWORKSPACE`).
+* Older macOS versions need **version-compatible Node** + consistent paths.
+* Local shells sometimes have bad `alias claude=...` leftovers from older installers.
+
+This script makes the outcome **predictable and repeatable**:
+
+* Installs and configures **Claude CLI**, **SuperClaude**, **Node (nvm)**, **pipx**, **uv/uvx**, and **realpath**.
+* Registers **6 MCP servers** in **user scope** (so they show up everywhere) and runs Node MCPs from **\$HOME** to avoid workspace collisions.
+* Repairs PATH, cleans broken aliases, fixes `pipx` shims, and adds optional project-level cleanup/merge helpers.
+
+---
+
+## What gets installed / ensured
+
+* **Python 3** (already installed on most systems)
+* **pipx** (for SuperClaude)
+* **uv/uvx** (for the Serena MCP server)
+* **realpath** (shim on macOS if missing)
+* **Node via nvm** (prefers Node **22**, falls back to **20** automatically)
+* **Claude CLI** (`@anthropic-ai/claude-code`, via npm by default)
+* **SuperClaude** (git first, PyPI fallback; with shim repair)
+* **MCP servers**:
+
+  * `sequential-thinking` (npx)
+  * `context7` (npx)
+  * `magic` (npx) — needs `TWENTYFIRST_API_KEY` to actually do UI generation
+  * `playwright` (npx)
+  * `morphllm-fast-apply` (npx) — optional `MORPH_API_KEY`
+  * `serena` (uvx) — **uses `uvx --from git+https://github.com/oraios/serena serena-mcp-server`** (no stray `--`)
 
 ---
 
 ## Quick start
 
-1. Save the script as `superclaude-up.sh` and make it executable:
+```bash
+# Clone or curl the script, then:
+bash superclaude-up.sh
+```
 
-   ```bash
-   chmod +x superclaude-up.sh
-   ```
+Non-interactive with PATH persistence:
 
-2. Run it (interactive defaults):
+```bash
+SC_YES=1 SC_PERSIST_PATH=1 bash superclaude-up.sh
+```
 
-   ```bash
-   ./superclaude-up.sh
-   ```
+To validate MCPs in both your home and your current project folder:
 
-3. Prefer **non-interactive**:
-
-   ```bash
-   SC_YES=1 SC_PERSIST_PATH=1 SC_SKIP_APPLY=1 ./superclaude-up.sh
-   ```
-
-> You can re-run the script anytime to update/repair your setup.
+```bash
+SC_VALIDATE_MCP=1 bash superclaude-up.sh
+```
 
 ---
 
-## Environment variables (optional)
+## Design choices that save you time
 
-| Var                 | Default | What it controls                                            |     |                                     |
-| ------------------- | ------- | ----------------------------------------------------------- | --- | ----------------------------------- |
-| `SC_YES`            | `0`     | `1` = auto-confirm safe prompts.                            |     |                                     |
-| `SC_PERSIST_PATH`   | `0`     | `1` = append PATH fixes to your shell profile.              |     |                                     |
-| `SC_SKIP_NODE`      | `0`     | `1` = don’t install/manage Node/nvm.                        |     |                                     |
-| `SC_NODE_PREFERRED` | `22`    | Preferred Node major.                                       |     |                                     |
-| `SC_NODE_FALLBACK`  | `20`    | Fallback Node major.                                        |     |                                     |
-| `SC_SOURCE`         | `git`   | Where SuperClaude is installed from (`git` or `pypi`).      |     |                                     |
-| `SC_SKIP_APPLY`     | `0`     | `1` = skip `SuperClaude install` wizard.                    |     |                                     |
-| `SC_CLAUDE_INSTALL` | `auto`  | \`auto                                                      | npm | brew\` — how to install Claude CLI. |
-| `SC_ADD_MCP`        | `1`     | `1` = register MCP servers (from `$HOME`). Set `0` to skip. |     |                                     |
-
-**Examples**
-
-* Headless “just fix it”:
-
-  ```bash
-  SC_YES=1 SC_PERSIST_PATH=1 SC_SKIP_APPLY=1 ./superclaude-up.sh
-  ```
-
-* Use Homebrew for Claude CLI on macOS:
-
-  ```bash
-  SC_CLAUDE_INSTALL=brew ./superclaude-up.sh
-  ```
-
-* Skip Node (you already have nvm/Node):
-
-  ```bash
-  SC_SKIP_NODE=1 ./superclaude-up.sh
-  ```
+* **User-scope MCPs by default**: They live in `~/.claude.json`, so **every folder** sees the same servers.
+* **Force `npx` to run from `$HOME`**: `npx -C "$HOME"` avoids **npm workspace** conflicts (e.g. `EDUPLICATEWORKSPACE`) inside monorepos.
+* **Serena via `uvx`**: Uses the correct syntax (`uvx --from … serena-mcp-server`). The common `uvx -- --from` typo is fixed.
+* **Version-adaptive Node**: Prefers `22`, falls back to `20` on older OSes.
+* **Safe idempotency**: Re-runs won’t break anything; they just update/repair what’s needed.
+* **No risky auto-chmod**: We **don’t** auto-fix zsh `compaudit` warnings; we print safe, manual commands instead.
 
 ---
 
-## What gets installed/ensured
+## Usage: common flows
 
-* **Python 3** (pre-existing), **pipx**, **uv/uvx**, **realpath** (shim if needed)
-* **nvm + Node** (**22** → fallback **20**), **npm**
-* **Claude CLI** (`claude`) — shims placed in `~/.local/bin`
-* **SuperClaude** (`SuperClaude`/`superclaude`) via `pipx`
-* **MCP servers** registered to launch from `$HOME`:
+### 1) Standard setup
 
-  * `sequential-thinking`
-  * `context7`
-  * `magic` (requires `TWENTYFIRST_API_KEY` for full functionality)
-  * `playwright`
-  * `morphllm-fast-apply` (optional `MORPH_API_KEY`)
-  * `serena` via `uvx` (if `uvx` available)
+```bash
+bash superclaude-up.sh
+```
 
-> Using `$HOME` as the MCP launch cwd prevents npm workspace name collisions you get inside monorepos.
+### 2) Non-interactive, persist PATH updates
+
+```bash
+SC_YES=1 SC_PERSIST_PATH=1 bash superclaude-up.sh
+```
+
+### 3) Register MCPs in **project** scope instead of user
+
+```bash
+SC_MCP_SCOPE=project bash superclaude-up.sh
+```
+
+> Tip: Project scope is rarely needed; prefer user scope.
+
+### 4) Validate MCPs in `$HOME` vs `$PWD`
+
+```bash
+SC_VALIDATE_MCP=1 bash superclaude-up.sh
+```
+
+### 5) Your project hides global MCPs? Repair or purge local config
+
+**Merge** user MCPs into the project `.claude.json` (non-destructive):
+
+```bash
+SC_REPAIR_PROJECT=1 bash superclaude-up.sh
+```
+
+**Purge** project overrides (backs up first):
+
+```bash
+SC_PURGE_PROJECT=1 bash superclaude-up.sh
+```
+
+---
+
+## Environment variables (advanced)
+
+| Variable            | Default | What it does                                                             |                                     |                                   |
+| ------------------- | ------: | ------------------------------------------------------------------------ | ----------------------------------- | --------------------------------- |
+| `SC_YES`            |     `0` | Auto-confirm prompts (set `1` for CI/non-interactive).                   |                                     |                                   |
+| `SC_PERSIST_PATH`   |     `0` | Append user bins to your shell profile (`.zprofile` or `.bash_profile`). |                                     |                                   |
+| `SC_SKIP_NODE`      |     `0` | Skip Node/nvm management.                                                |                                     |                                   |
+| `SC_NODE_PREFERRED` |    `22` | Preferred Node major version.                                            |                                     |                                   |
+| `SC_NODE_FALLBACK`  |    `20` | Fallback Node major version.                                             |                                     |                                   |
+| `SC_CLAUDE_INSTALL` |  `auto` | \`auto                                                                   | npm                                 | brew`– default resolves to`npm\`. |
+| `SC_SOURCE`         |   `git` | SuperClaude source: `git` or `pypi`.                                     |                                     |                                   |
+| `SC_SKIP_APPLY`     |     `0` | Skip `SuperClaude install` wizard.                                       |                                     |                                   |
+| `SC_ADD_MCP`        |     `1` | Register MCP servers.                                                    |                                     |                                   |
+| `SC_MCP_SCOPE`      |  `user` | \`user                                                                   | project\` – where to register MCPs. |                                   |
+| `SC_VALIDATE_MCP`   |     `0` | Show MCP lists in both `$HOME` and `$PWD`.                               |                                     |                                   |
+| `SC_PURGE_PROJECT`  |     `0` | Backup+remove project `.claude.json` / `.claude`.                        |                                     |                                   |
+| `SC_REPAIR_PROJECT` |     `0` | Merge user MCPs into project `.claude.json`.                             |                                     |                                   |
+
+---
+
+## API keys (put in your shell rc)
+
+```bash
+# 21st.dev Magic MCP (UI component generation)
+export TWENTYFIRST_API_KEY="...your key..."
+
+# Morph Fast Apply MCP
+export MORPH_API_KEY="...your key..."
+```
+
+Then restart your shell, or `source ~/.zshrc` / `source ~/.bashrc`.
 
 ---
 
 ## Verifying your setup
 
 ```bash
-# Claude CLI exists and reports a version
-which claude && claude --version
-
-# SuperClaude exists (either name)
-which SuperClaude || which superclaude
-SuperClaude --version 2>/dev/null || superclaude --version 2>/dev/null
-
-# MCP servers registered
-claude mcp list
-```
-
-You should see your MCP servers listed. If you run in a monorepo and previously saw `npm ERR! EDUPLICATEWORKSPACE`, that should be gone now.
-
----
-
-## API keys you might want
-
-If you selected these MCPs, set their keys in your shell rc (`~/.zshrc`, `~/.bashrc`, etc.):
-
-```bash
-export TWENTYFIRST_API_KEY="..."  # for @21st-dev/magic
-export MORPH_API_KEY="..."        # for @morph-llm/morph-fast-apply
-```
-
-Restart your shell (or `source` your rc file) after setting keys.
-
----
-
-## Troubleshooting
-
-### “Claude CLI not found” or wrong version
-
-* Remove stale aliases and ensure PATH shims exist:
-
-  ```bash
-  grep -R 'alias[[:space:]]\+claude=' ~/.zshrc ~/.zprofile ~/.zshenv ~/.bashrc ~/.bash_profile ~/.profile 2>/dev/null
-  # If you see any, delete those lines, then:
-  SC_YES=1 ./superclaude-up.sh
-  ```
-* Make sure `~/.local/bin` is in your PATH (the script can persist this for you with `SC_PERSIST_PATH=1`).
-
-### `npm ERR! EDUPLICATEWORKSPACE` when MCP starts
-
-* The script registers MCPs to run from **`$HOME`** with `npx -C "$HOME"` — this avoids the collision.
-* Re-register manually if needed:
-
-  ```bash
-  claude mcp remove magic 2>/dev/null || true
-  claude mcp add magic npx -y -C "$HOME" @21st-dev/magic
-  ```
-
-### Serena fails to start
-
-* Make sure `uvx` is installed (the script attempts to install `uv`) and `realpath` exists (shim is provided).
-* Re-register:
-
-  ```bash
-  claude mcp remove serena 2>/dev/null || true
-  claude mcp add serena uvx -- --from git+https://github.com/oraios/serena serena-mcp-server
-  ```
-
-### `pipx` shows SuperClaude installed, but `SuperClaude` isn’t on PATH
-
-* The script will try to repair, but you can do it manually:
-
-  ```bash
-  pipx uninstall superclaude || true
-  pipx install SuperClaude
-  ln -sf ~/.local/pipx/venvs/superclaude/bin/SuperClaude ~/.local/bin/SuperClaude
-  ln -sf ~/.local/pipx/venvs/superclaude/bin/superclaude ~/.local/bin/superclaude
-  hash -r
-  ```
-
-### zsh: “insecure directories, run compaudit”
-
-* The script **does not** auto-chmod. Review and fix manually:
-
-  ```bash
-  compaudit
-  # Suggested (review carefully!)
-  compaudit | xargs -I{} chmod g-w '{}'
-  compaudit | xargs -I{} chown "$USER" '{}'
-  ```
-
-### Old macOS can’t build Node 22 with Homebrew
-
-* That’s expected for Tier-3 macOS. The script uses **nvm** to fetch a compatible binary and falls back to **Node 20** automatically.
-
----
-
-## Uninstall / Reset
-
-* Remove Claude CLI (npm):
-
-  ```bash
-  npm -g uninstall @anthropic-ai/claude-code || true
-  ```
-* Remove SuperClaude:
-
-  ```bash
-  pipx uninstall superclaude || true
-  rm -rf ~/.claude
-  ```
-* Remove MCP registrations:
-
-  ```bash
-  claude mcp list | awk '{print $1}' | xargs -I{} claude mcp remove {} || true
-  ```
-* Clean PATH shims / aliases you added manually.
-
----
-
-## Design notes & guarantees
-
-* **Idempotent**: safe to run repeatedly; it updates in place.
-* **No sudo**: user-local installs only.
-* **Version-adaptive**: newest compatible versions for your OS/CPU.
-* **Stable MCPs**: always launched from a **clean cwd** to avoid local workspace conflicts.
-
----
-
-## Common run modes
-
-* **Everything, auto-confirm, persist PATH, skip the interactive wizard**
-
-  ```bash
-  SC_YES=1 SC_PERSIST_PATH=1 SC_SKIP_APPLY=1 ./superclaude-up.sh
-  ```
-* **Use Homebrew for Claude on macOS**
-
-  ```bash
-  SC_CLAUDE_INSTALL=brew ./superclaude-up.sh
-  ```
-* **Pin Node policy**
-
-  ```bash
-  SC_NODE_PREFERRED=22 SC_NODE_FALLBACK=20 ./superclaude-up.sh
-  ```
-* **Skip MCP registration (do it yourself later)**
-
-  ```bash
-  SC_ADD_MCP=0 ./superclaude-up.sh
-  ```
-
----
-
-## After install: quick sanity checks
-
-```bash
+which claude
 claude --version
 claude mcp list
-SuperClaude --version 2>/dev/null || superclaude --version
 ```
 
-If anything looks off, just re-run:
+You should see all six MCP servers in **any** directory. If `labspace` shows them but `labspace/plinto` doesn’t:
+
+* The folder likely has a **project-level** `.claude.json` that **overrides** your user config.
+* Fix it with either:
+
+  * **Merge**: `SC_REPAIR_PROJECT=1 bash superclaude-up.sh`
+    (Adds any missing user-scope servers into the project file)
+  * **Purge**: `SC_PURGE_PROJECT=1 bash superclaude-up.sh`
+    (Backs up and removes local overrides so the user list shines through)
+
+---
+
+## Troubleshooting (greatest hits)
+
+### `npm error code EDUPLICATEWORKSPACE`
+
+* Cause: Running `npx` inside a monorepo with conflicting workspace names.
+* Fix in script: MCP registration uses `npx -C "$HOME" …` so Node MCPs **launch from your home**, not your repo.
+
+### Serena fails to parse `--from`
+
+* Symptom: `error: Failed to parse: --from`
+* Cause: Using `uvx -- --from …` (extra `--`).
+* Fix in script: Uses `uvx --from git+https://github.com/oraios/serena serena-mcp-server`.
+
+### `No MCP servers configured` only in a subfolder
+
+* Cause: Project `.claude.json` overrides your user list with an empty/limited set.
+* Fix: `SC_REPAIR_PROJECT=1` (merge) or `SC_PURGE_PROJECT=1` (remove overrides with backup).
+
+### Claude CLI exists but wrong alias takes precedence
+
+* Symptom: `type -a claude` shows an `alias` path that no longer exists.
+* Fix in script: Removes `alias claude=…` lines safely from your shell rc files and re-shims the real binary into `~/.local/bin`.
+
+### zsh `compaudit` “insecure directories”
+
+* We **don’t** auto-chmod. Script prints **manual** commands you can review & run.
+
+---
+
+## Uninstall / rollback
+
+* MCP registration:
+
+  * User scope → edit/remove entries in `~/.claude.json`
+  * Project scope → edit/remove entries in `<project>/.claude.json`
+* SuperClaude venv:
+
+  ```bash
+  pipx uninstall superclaude
+  rm -f ~/.local/bin/SuperClaude ~/.local/bin/superclaude
+  ```
+* Claude CLI (npm):
+
+  ```bash
+  npm -g uninstall @anthropic-ai/claude-code
+  ```
+* Node versions / nvm:
+
+  ```bash
+  nvm ls
+  nvm uninstall <version>
+  ```
+
+---
+
+## Security notes
+
+* No elevation (`sudo`) is used.
+* We don’t auto-modify permissions on shell directories (zsh `compaudit`); guidance is printed instead.
+* MCP registration is explicit and scoped; you control whether it’s `user` or `project`.
+
+---
+
+## Contributing
+
+PRs welcome! Please:
+
+* Keep the script **idempotent**.
+* Prefer **user-scope defaults** and **safe fallbacks**.
+* Add comments for non-obvious choices (especially around MCPs/monorepos).
+
+---
+
+## License
+
+You choose. If you don’t have one yet, MIT is a good default.
+
+---
+
+## Changelog (highlights)
+
+* **Serena via `uvx`** with correct args (no extra `--`).
+* **Monorepo-safe MCP** registration with `npx -C "$HOME"`.
+* **User-scope** MCPs by default; optional project scope.
+* **Repair/Purge** tools for project config drift.
+* Robust **pipx** shim repair and **alias** cleanup.
+* Version-adaptive **Node 22 → 20** install.
+
+---
+
+## One last sanity check
 
 ```bash
-SC_YES=1 ./superclaude-up.sh
+# Show MCPs in home and project
+SC_VALIDATE_MCP=1 bash superclaude-up.sh
 ```
 
-That’s it. Happy building!
+If they differ, use `SC_REPAIR_PROJECT=1` or `SC_PURGE_PROJECT=1` as described above. Happy building!
