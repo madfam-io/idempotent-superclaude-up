@@ -67,7 +67,7 @@ ask_yn(){
 
 # BSD vs GNU sed
 sedi(){
-  if [[ "$OS" == "Darwin" ]]; then sed -i '' "$@"; else sed -i "$@"; fi
+  if [[ "$OS" == "Darwin" ]]; then sed -E -i '' "$@"; else sed -E -i "$@"; fi
 }
 
 # ------------------------------ Python / PATH -----------------------------
